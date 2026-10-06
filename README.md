@@ -1,8 +1,8 @@
-# Bandz Sessions
+# Bandz Sessions | Killzones, Opening Range & ORG
 
 Free, open-source Pine Script v6 indicator by Bandz-ICT.
 
-Session ranges, opening-range brackets, opening prices, and Opening RTH Gap context.
+Killzone/session ranges, opening-range brackets, opening prices, and Opening RTH Gap context.
 
 ## Install in TradingView
 
