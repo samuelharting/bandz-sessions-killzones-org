@@ -1,0 +1,1953 @@
+//@version=6
+// Bandz Session Ranges + ORG + Opening Prices
+// Reorganized from the user's Bandz Levels and Bandz ORG indicators.
+indicator(title="Bandz Session Ranges + ORG + Opening Prices", shorttitle="Bandz Sessions", overlay=true, max_bars_back=5000, max_lines_count=500, max_labels_count=500, max_boxes_count=500, dynamic_requests=true)
+
+// ============================================================================
+// =========================  QUICK ORG TOGGLE  ===============================
+// ============================================================================
+
+org_group_main = "ORG - Opening RTH Gap"
+
+org_show = input.bool(
+     false,
+     "Show ORG",
+     group=org_group_main)
+
+// =====================  ORG — OPENING RTH GAP + STDV  ======================
+// ============================================================================
+// Correct STDV logic:
+// +0.5 STDV = ORG high + one-half ORG range
+// -0.5 STDV = ORG low  - one-half ORG range
+// +1 STDV   = ORG high + one complete ORG range
+// -1 STDV   = ORG low  - one complete ORG range
+//
+// Example gap down:
+// Prior close = 20,000
+// 9:30 open  = 19,950
+// ORG size   = 50
+// +1 STDV    = 20,050
+// -1 STDV    = 19,900
+//
+// Displays only on 1m, 2m, and 3m charts.
+
+org_group_style  = "ORG - Line Style"
+org_group_stdv   = "ORG - STDV Projections"
+org_group_labels = "ORG - Labels / Buffer"
+
+// ============================================================================
+// INPUTS
+// ============================================================================
+// Show ORG is declared at the very top of the script so it stays first.
+
+org_close_basis = input.string(
+     "CME Futures 16:14",
+     "Prior RTH Close Source",
+     options=[
+         "CME Futures 16:14",
+         "US Equities 15:59"
+     ],
+     group=org_group_main,
+     tooltip="Use CME Futures 16:14 for instruments such as ES, NQ, YM, and RTY. Use US Equities 15:59 for regular US stocks.")
+
+org_large_gap_ticks = input.int(
+     100,
+     "Large Gap Threshold (ticks)",
+     minval=1,
+     group=org_group_main,
+     tooltip="Large gaps show 9:30 Open, Prior Close, 25%, 50%, and 75%. Small gaps show 9:30 Open, Prior Close, and 50%.")
+
+org_sessions_to_keep = input.int(
+     1,
+     "ORG Sessions to Keep",
+     minval=1,
+     maxval=5,
+     group=org_group_main,
+     tooltip="Controls how many completed ORG sessions remain on the chart.")
+
+// ============================================================================
+// ORG LINE STYLE
+// ============================================================================
+
+org_open_color = input.color(
+     color.black,
+     "9:30 Open",
+     inline="ORGENDS",
+     group=org_group_style)
+
+org_close_color = input.color(
+     color.black,
+     "Prior RTH Close",
+     inline="ORGENDS",
+     group=org_group_style)
+
+org_internal_color = input.color(
+     color.black,
+     "25 / 50 / 75",
+     group=org_group_style)
+
+org_line_style_txt = input.string(
+     "Dashed",
+     "ORG Style",
+     options=[
+         "Solid",
+         "Dotted",
+         "Dashed"
+     ],
+     inline="ORGS",
+     group=org_group_style)
+
+org_line_width = input.int(
+     1,
+     "Width",
+     minval=1,
+     maxval=4,
+     inline="ORGS",
+     group=org_group_style)
+
+// ============================================================================
+// STDV STYLE
+// ============================================================================
+
+org_max_deviation = input.int(
+     5,
+     "Maximum STDV",
+     minval=1,
+     maxval=10,
+     group=org_group_stdv,
+     tooltip="Starts with +0.5 and -0.5. Touching either visible level reveals +1/-1, then each next whole-number pair.")
+
+org_up_color = input.color(
+     color.rgb(242, 54, 69),
+     "+STDV",
+     inline="ORGDEV",
+     group=org_group_stdv)
+
+org_down_color = input.color(
+     color.rgb(41, 98, 255),
+     "-STDV",
+     inline="ORGDEV",
+     group=org_group_stdv)
+
+org_dev_style_txt = input.string(
+     "Dotted",
+     "STDV Style",
+     options=[
+         "Solid",
+         "Dotted",
+         "Dashed"
+     ],
+     inline="ORGDEVS",
+     group=org_group_stdv)
+
+org_dev_width = input.int(
+     1,
+     "Width",
+     minval=1,
+     maxval=4,
+     inline="ORGDEVS",
+     group=org_group_stdv)
+
+// ============================================================================
+// LABELS AND BUFFER
+// ============================================================================
+
+org_show_labels = input.bool(
+     true,
+     "Show ORG Labels",
+     inline="ORGL",
+     group=org_group_labels)
+
+org_label_color = input.color(
+     color.black,
+     "",
+     inline="ORGL",
+     group=org_group_labels)
+
+org_label_size_txt = input.string(
+     "Tiny",
+     "Label Size",
+     options=[
+         "Tiny",
+         "Small",
+         "Normal",
+         "Large"
+     ],
+     group=org_group_labels)
+
+org_right_buffer = input.int(
+     8,
+     "ORG Right Buffer (Bars)",
+     minval=0,
+     maxval=500,
+     group=org_group_labels,
+     tooltip="Pushes active ORG line ends and labels this many chart bars to the right.")
+
+// ============================================================================
+// STYLE FUNCTIONS
+// ============================================================================
+
+org_get_line_style(string _style) =>
+    switch _style
+        "Solid"  => line.style_solid
+        "Dotted" => line.style_dotted
+        "Dashed" => line.style_dashed
+        => line.style_dotted
+
+org_get_label_size(string _size) =>
+    switch _size
+        "Tiny"   => size.tiny
+        "Small"  => size.small
+        "Normal" => size.normal
+        "Large"  => size.large
+        => size.tiny
+
+// ============================================================================
+// EXACT 1-MINUTE ORG DATA
+// ============================================================================
+
+org_get_930_open_1m() =>
+    bool _is930 =
+         hour(time, "America/New_York") == 9 and
+         minute(time, "America/New_York") == 30
+
+    ta.valuewhen(_is930, open, 0)
+
+org_get_930_time_1m() =>
+    bool _is930 =
+         hour(time, "America/New_York") == 9 and
+         minute(time, "America/New_York") == 30
+
+    ta.valuewhen(_is930, time, 0)
+
+org_get_close_at_time_1m(int _hour, int _minute) =>
+    bool _isCloseBar =
+         hour(time, "America/New_York") == _hour and
+         minute(time, "America/New_York") == _minute
+
+    ta.valuewhen(_isCloseBar, close, 0)
+
+org_get_rth_high_1m(int _sessionEndMinute) =>
+    int _minuteOfDay =
+         hour(time, "America/New_York") * 60 +
+         minute(time, "America/New_York")
+
+    bool _is930 =
+         _minuteOfDay == 570
+
+    bool _insideRth =
+         _minuteOfDay >= 570 and
+         _minuteOfDay < _sessionEndMinute
+
+    var float _sessionHigh = na
+
+    if _is930
+        _sessionHigh := high
+    else if _insideRth
+        _sessionHigh := na(_sessionHigh) ?
+             high :
+             math.max(_sessionHigh, high)
+
+    _sessionHigh
+
+org_get_rth_low_1m(int _sessionEndMinute) =>
+    int _minuteOfDay =
+         hour(time, "America/New_York") * 60 +
+         minute(time, "America/New_York")
+
+    bool _is930 =
+         _minuteOfDay == 570
+
+    bool _insideRth =
+         _minuteOfDay >= 570 and
+         _minuteOfDay < _sessionEndMinute
+
+    var float _sessionLow = na
+
+    if _is930
+        _sessionLow := low
+    else if _insideRth
+        _sessionLow := na(_sessionLow) ?
+             low :
+             math.min(_sessionLow, low)
+
+    _sessionLow
+
+// Exact 9:30 open and time.
+
+float org_feed_930_open = request.security(
+     syminfo.tickerid,
+     "1",
+     org_get_930_open_1m(),
+     barmerge.gaps_off,
+     barmerge.lookahead_off)
+
+int org_feed_930_time = request.security(
+     syminfo.tickerid,
+     "1",
+     org_get_930_time_1m(),
+     barmerge.gaps_off,
+     barmerge.lookahead_off)
+
+// Both possible close sources are calculated.
+// The selected setting determines which one is used.
+
+float org_feed_close_1614 = request.security(
+     syminfo.tickerid,
+     "1",
+     org_get_close_at_time_1m(16, 14),
+     barmerge.gaps_off,
+     barmerge.lookahead_off)
+
+float org_feed_close_1559 = request.security(
+     syminfo.tickerid,
+     "1",
+     org_get_close_at_time_1m(15, 59),
+     barmerge.gaps_off,
+     barmerge.lookahead_off)
+
+// CME session continues through the 16:14 bar.
+// Equity RTH ends after the 15:59 bar.
+
+float org_feed_cme_high = request.security(
+     syminfo.tickerid,
+     "1",
+     org_get_rth_high_1m(975),
+     barmerge.gaps_off,
+     barmerge.lookahead_off)
+
+float org_feed_cme_low = request.security(
+     syminfo.tickerid,
+     "1",
+     org_get_rth_low_1m(975),
+     barmerge.gaps_off,
+     barmerge.lookahead_off)
+
+float org_feed_equity_high = request.security(
+     syminfo.tickerid,
+     "1",
+     org_get_rth_high_1m(960),
+     barmerge.gaps_off,
+     barmerge.lookahead_off)
+
+float org_feed_equity_low = request.security(
+     syminfo.tickerid,
+     "1",
+     org_get_rth_low_1m(960),
+     barmerge.gaps_off,
+     barmerge.lookahead_off)
+
+bool org_use_cme_close =
+     org_close_basis == "CME Futures 16:14"
+
+float org_feed_rth_close =
+     org_use_cme_close ?
+     org_feed_close_1614 :
+     org_feed_close_1559
+
+float org_feed_rth_high =
+     org_use_cme_close ?
+     org_feed_cme_high :
+     org_feed_equity_high
+
+float org_feed_rth_low =
+     org_use_cme_close ?
+     org_feed_cme_low :
+     org_feed_equity_low
+
+// ============================================================================
+// ARRAYS AND CURRENT-SESSION STATE
+// ============================================================================
+
+var line[] org_all_lines       = array.new_line()
+var label[] org_all_labels     = array.new_label()
+var int[] org_day_line_counts  = array.new_int()
+var int[] org_day_label_counts = array.new_int()
+
+var float org_current_open       = na
+var float org_current_close      = na
+var float org_current_gap_size   = na
+var float org_current_range_high = na
+var float org_current_range_low  = na
+
+var int org_current_open_time  = na
+var float org_revealed_deviation = 0.0
+
+var bool org_current_valid        = false
+var bool org_current_is_large_gap = false
+
+// ============================================================================
+// OBJECT STORAGE
+// ============================================================================
+
+org_store_line(
+     line[] _allLines,
+     int[] _dayCounts,
+     line _newLine) =>
+
+    array.unshift(_allLines, _newLine)
+
+    if array.size(_dayCounts) > 0
+        array.set(
+             _dayCounts,
+             0,
+             array.get(_dayCounts, 0) + 1)
+
+org_store_label(
+     label[] _allLabels,
+     int[] _dayCounts,
+     label _newLabel) =>
+
+    array.unshift(_allLabels, _newLabel)
+
+    if array.size(_dayCounts) > 0
+        array.set(
+             _dayCounts,
+             0,
+             array.get(_dayCounts, 0) + 1)
+
+// ============================================================================
+// CREATE ONE HORIZONTAL LEVEL
+// ============================================================================
+
+org_add_level(
+     line[] _allLines,
+     label[] _allLabels,
+     int[] _lineCounts,
+     int[] _labelCounts,
+     int _startTime,
+     int _endTime,
+     float _price,
+     string _text,
+     color _lineColor,
+     string _styleText,
+     int _lineWidth,
+     bool _showLabel,
+     color _labelColor,
+     string _labelSizeText) =>
+
+    if not na(_price)
+        line _newLine = line.new(
+             _startTime,
+             _price,
+             _endTime,
+             _price,
+             xloc=xloc.bar_time,
+             color=_lineColor,
+             style=org_get_line_style(_styleText),
+             width=_lineWidth)
+
+        org_store_line(
+             _allLines,
+             _lineCounts,
+             _newLine)
+
+        if _showLabel
+            label _newLabel = label.new(
+                 _endTime,
+                 _price,
+                 _text,
+                 xloc=xloc.bar_time,
+                 style=label.style_label_left,
+                 color=color.new(color.black, 100),
+                 textcolor=_labelColor,
+                 size=org_get_label_size(_labelSizeText))
+
+            org_store_label(
+                 _allLabels,
+                 _labelCounts,
+                 _newLabel)
+
+// ============================================================================
+// CREATE CORRECT STDV PAIR
+// ============================================================================
+
+org_deviation_text(float _deviation) =>
+    _deviation == math.floor(_deviation) ?
+         str.tostring(int(_deviation)) :
+         str.tostring(_deviation)
+
+org_add_deviation_pair(
+     line[] _allLines,
+     label[] _allLabels,
+     int[] _lineCounts,
+     int[] _labelCounts,
+     int _startTime,
+     int _endTime,
+     float _rangeHigh,
+     float _rangeLow,
+     float _gapSize,
+     float _deviation,
+     color _upColor,
+     color _downColor,
+     string _styleText,
+     int _lineWidth,
+     bool _showLabel,
+     color _labelColor,
+     string _labelSizeText) =>
+
+    // Correct logic:
+    // Project upward from the ORG high.
+    // Project downward from the ORG low.
+
+    float _upper =
+         _rangeHigh +
+         (_gapSize * _deviation)
+
+    float _lower =
+         _rangeLow -
+         (_gapSize * _deviation)
+
+    org_add_level(
+         _allLines,
+         _allLabels,
+         _lineCounts,
+         _labelCounts,
+         _startTime,
+         _endTime,
+         _upper,
+         "+" + org_deviation_text(_deviation) + " STDV",
+         _upColor,
+         _styleText,
+         _lineWidth,
+         _showLabel,
+         _labelColor,
+         _labelSizeText)
+
+    org_add_level(
+         _allLines,
+         _allLabels,
+         _lineCounts,
+         _labelCounts,
+         _startTime,
+         _endTime,
+         _lower,
+         "-" + org_deviation_text(_deviation) + " STDV",
+         _downColor,
+         _styleText,
+         _lineWidth,
+         _showLabel,
+         _labelColor,
+         _labelSizeText)
+
+// ============================================================================
+// DELETE OLD ORG SESSIONS
+// ============================================================================
+
+org_delete_old_sessions(
+     line[] _allLines,
+     label[] _allLabels,
+     int[] _lineCounts,
+     int[] _labelCounts,
+     int _sessionsToKeep) =>
+
+    while array.size(_lineCounts) > _sessionsToKeep
+        int _oldLineCount =
+             array.pop(_lineCounts)
+
+        if _oldLineCount > 0
+            for _i = 0 to _oldLineCount - 1
+                if array.size(_allLines) > 0
+                    line _oldLine =
+                         array.pop(_allLines)
+
+                    line.delete(_oldLine)
+
+    while array.size(_labelCounts) > _sessionsToKeep
+        int _oldLabelCount =
+             array.pop(_labelCounts)
+
+        if _oldLabelCount > 0
+            for _i = 0 to _oldLabelCount - 1
+                if array.size(_allLabels) > 0
+                    label _oldLabel =
+                         array.pop(_allLabels)
+
+                    label.delete(_oldLabel)
+
+// ============================================================================
+// TIMEFRAME RESTRICTION
+// ============================================================================
+
+bool org_valid_chart =
+     timeframe.isminutes and
+     timeframe.multiplier >= 1 and
+     timeframe.multiplier <= 3
+
+int org_chart_bar_ms =
+     org_valid_chart ?
+     math.max(
+         1000,
+         int(timeframe.in_seconds(timeframe.period) * 1000)) :
+     60000
+
+int org_active_end_time =
+     time +
+     (org_chart_bar_ms * org_right_buffer)
+
+// ============================================================================
+// DETECT NEW 9:30 ORG
+// ============================================================================
+
+bool org_new_rth_open =
+     org_show and
+     org_valid_chart and
+     not na(org_feed_930_time) and
+     (
+         na(org_feed_930_time[1]) or
+         org_feed_930_time != org_feed_930_time[1]
+     )
+
+// ============================================================================
+// CREATE NEW ORG
+// ============================================================================
+
+if org_new_rth_open
+    org_current_open      := org_feed_930_open
+    org_current_close     := org_feed_rth_close
+    org_current_gap_size  := math.abs(
+         org_current_open -
+         org_current_close)
+
+    org_current_range_high := math.max(
+         org_current_open,
+         org_current_close)
+
+    org_current_range_low := math.min(
+         org_current_open,
+         org_current_close)
+
+    org_current_open_time  := org_feed_930_time
+    org_revealed_deviation := 0.0
+
+    org_current_valid :=
+         not na(org_current_open) and
+         not na(org_current_close) and
+         not na(org_current_range_high) and
+         not na(org_current_range_low) and
+         org_current_gap_size >= syminfo.mintick
+
+    if org_current_valid
+        array.unshift(
+             org_day_line_counts,
+             0)
+
+        array.unshift(
+             org_day_label_counts,
+             0)
+
+        float org_gap_signed =
+             org_current_open -
+             org_current_close
+
+        float org_25 =
+             org_current_close +
+             (org_gap_signed * 0.25)
+
+        float org_50 =
+             org_current_close +
+             (org_gap_signed * 0.50)
+
+        float org_75 =
+             org_current_close +
+             (org_gap_signed * 0.75)
+
+        float org_gap_ticks =
+             org_current_gap_size /
+             syminfo.mintick
+
+        org_current_is_large_gap :=
+             org_gap_ticks >=
+             org_large_gap_ticks
+
+        // Prior RTH close.
+
+        org_add_level(
+             org_all_lines,
+             org_all_labels,
+             org_day_line_counts,
+             org_day_label_counts,
+             org_current_open_time,
+             org_active_end_time,
+             org_current_close,
+             "CLOSE",
+             org_close_color,
+             org_line_style_txt,
+             org_line_width,
+             org_show_labels,
+             org_label_color,
+             org_label_size_txt)
+
+        // Current 9:30 RTH open.
+
+        org_add_level(
+             org_all_lines,
+             org_all_labels,
+             org_day_line_counts,
+             org_day_label_counts,
+             org_current_open_time,
+             org_active_end_time,
+             org_current_open,
+             "9:30",
+             org_open_color,
+             org_line_style_txt,
+             org_line_width,
+             org_show_labels,
+             org_label_color,
+             org_label_size_txt)
+
+        // Large gaps show 25%.
+
+        if org_current_is_large_gap
+            org_add_level(
+                 org_all_lines,
+                 org_all_labels,
+                 org_day_line_counts,
+                 org_day_label_counts,
+                 org_current_open_time,
+                 org_active_end_time,
+                 org_25,
+                 "25%",
+                 org_internal_color,
+                 org_line_style_txt,
+                 org_line_width,
+                 org_show_labels,
+                 org_label_color,
+                 org_label_size_txt)
+
+        // All valid gaps show 50%.
+
+        org_add_level(
+             org_all_lines,
+             org_all_labels,
+             org_day_line_counts,
+             org_day_label_counts,
+             org_current_open_time,
+             org_active_end_time,
+             org_50,
+             "50%",
+             org_internal_color,
+             org_line_style_txt,
+             org_line_width,
+             org_show_labels,
+             org_label_color,
+             org_label_size_txt)
+
+        // Large gaps show 75%.
+
+        if org_current_is_large_gap
+            org_add_level(
+                 org_all_lines,
+                 org_all_labels,
+                 org_day_line_counts,
+                 org_day_label_counts,
+                 org_current_open_time,
+                 org_active_end_time,
+                 org_75,
+                 "75%",
+                 org_internal_color,
+                 org_line_style_txt,
+                 org_line_width,
+                 org_show_labels,
+                 org_label_color,
+                 org_label_size_txt)
+
+        // STDVs only exist on large gaps—the same gaps that show 25% and 75%.
+
+        if org_current_is_large_gap
+            org_revealed_deviation := 0.5
+
+            org_add_deviation_pair(
+                 org_all_lines,
+                 org_all_labels,
+                 org_day_line_counts,
+                 org_day_label_counts,
+                 org_current_open_time,
+                 org_active_end_time,
+                 org_current_range_high,
+                 org_current_range_low,
+                 org_current_gap_size,
+                 org_revealed_deviation,
+                 org_up_color,
+                 org_down_color,
+                 org_dev_style_txt,
+                 org_dev_width,
+                 org_show_labels,
+                 org_label_color,
+                 org_label_size_txt)
+        else
+            org_revealed_deviation := 0.0
+
+        org_delete_old_sessions(
+             org_all_lines,
+             org_all_labels,
+             org_day_line_counts,
+             org_day_label_counts,
+             org_sessions_to_keep)
+
+// ============================================================================
+// KEEP CURRENT ORG EXTENDED TO THE RIGHT BUFFER
+// ============================================================================
+
+if org_show and
+   org_valid_chart and
+   org_current_valid and
+   array.size(org_day_line_counts) > 0
+
+    int org_current_line_count =
+         array.get(
+             org_day_line_counts,
+             0)
+
+    if org_current_line_count > 0
+        for org_i = 0 to org_current_line_count - 1
+            if org_i < array.size(org_all_lines)
+                line.set_x2(
+                     array.get(
+                         org_all_lines,
+                         org_i),
+                     org_active_end_time)
+
+    int org_current_label_count =
+         array.get(
+             org_day_label_counts,
+             0)
+
+    if org_current_label_count > 0
+        for org_i = 0 to org_current_label_count - 1
+            if org_i < array.size(org_all_labels)
+                label.set_x(
+                     array.get(
+                         org_all_labels,
+                         org_i),
+                     org_active_end_time)
+
+// ============================================================================
+// PROGRESSIVE STDV REVEAL
+// ============================================================================
+//
+// Touch +0.5 OR -0.5 to reveal +1 and -1.
+// Touch +1 OR -1 to reveal +2 and -2.
+// Continue in whole-number steps until Maximum STDV.
+//
+// The touch calculations use the exact same ORG-boundary logic as the lines.
+
+if org_show and
+   org_valid_chart and
+   org_current_valid and
+   org_current_is_large_gap and
+   org_revealed_deviation >= 0.5 and
+   org_revealed_deviation < org_max_deviation
+
+    bool org_keep_checking = true
+
+    while org_keep_checking and
+          org_revealed_deviation < org_max_deviation
+
+        float org_test_upper =
+             org_current_range_high +
+             (
+                 org_current_gap_size *
+                 org_revealed_deviation
+             )
+
+        float org_test_lower =
+             org_current_range_low -
+             (
+                 org_current_gap_size *
+                 org_revealed_deviation
+             )
+
+        bool org_upper_touched =
+             not na(org_feed_rth_high) and
+             org_feed_rth_high >=
+             org_test_upper
+
+        bool org_lower_touched =
+             not na(org_feed_rth_low) and
+             org_feed_rth_low <=
+             org_test_lower
+
+        bool org_level_touched =
+             org_upper_touched or
+             org_lower_touched
+
+        if org_level_touched
+            org_revealed_deviation := org_revealed_deviation < 1.0 ? 1.0 : org_revealed_deviation + 1.0
+
+            org_add_deviation_pair(
+                 org_all_lines,
+                 org_all_labels,
+                 org_day_line_counts,
+                 org_day_label_counts,
+                 org_current_open_time,
+                 org_active_end_time,
+                 org_current_range_high,
+                 org_current_range_low,
+                 org_current_gap_size,
+                 org_revealed_deviation,
+                 org_up_color,
+                 org_down_color,
+                 org_dev_style_txt,
+                 org_dev_width,
+                 org_show_labels,
+                 org_label_color,
+                 org_label_size_txt)
+        else
+            org_keep_checking := false
+
+
+// ============================================================================
+// =========================== OPENING PRICES ================================
+// ============================================================================
+// Moved from Bandz Levels. Each scheduled open keeps its original session,
+// color, timeframe gate, hard-lock time, label behavior, and history control.
+
+open_group_settings = "Opening Prices - Settings"
+open_group_labels   = "Opening Prices - Label Combining"
+open_group_prices   = "Opening Prices"
+
+open_history_limit = input.int(
+     1,
+     "Opening Drawing Limit",
+     minval=1,
+     maxval=50,
+     group=open_group_settings,
+     tooltip="Keeps this many records for each enabled opening price unless Unlimited is enabled.")
+
+open_unlimited = input.bool(
+     false,
+     "Unlimited",
+     group=open_group_settings,
+     tooltip="Shows as many records for each enabled opening price as TradingView object limits allow.")
+
+open_gmt_tz = input.string(
+     "America/New_York",
+     "Opening Timezone",
+     options=["America/New_York","GMT-12","GMT-11","GMT-10","GMT-9","GMT-8","GMT-7","GMT-6","GMT-5","GMT-4","GMT-3","GMT-2","GMT-1","GMT+0","GMT+1","GMT+2","GMT+3","GMT+4","GMT+5","GMT+6","GMT+7","GMT+8","GMT+9","GMT+10","GMT+11","GMT+12","GMT+13","GMT+14"],
+     group=open_group_settings,
+     tooltip="GMT choices are not adjusted for Daylight Saving Time changes.")
+
+open_label_size_txt = input.string(
+     "Tiny",
+     "Opening Label Size",
+     options=["Auto", "Tiny", "Small", "Normal", "Large", "Huge"],
+     group=open_group_settings)
+
+open_txt_color = input.color(
+     color.rgb(99, 99, 99),
+     "Opening Label Color",
+     group=open_group_settings)
+
+open_label_price = input.bool(
+     false,
+     "Display Price in Opening Labels",
+     group=open_group_settings)
+
+open_right_buffer = input.int(
+     10,
+     "Opening Right Buffer (Bars)",
+     minval=0,
+     maxval=500,
+     group=open_group_settings,
+     tooltip="Pushes active opening-price line ends and labels this many chart bars to the right, without passing their hard-lock time.")
+
+open_combine_labels = input.bool(
+     true,
+     "Combine Close Opening Labels",
+     group=open_group_labels,
+     tooltip="Combines opening-price labels that are close together to reduce clutter.")
+
+open_combine_threshold = input.float(
+     0.02,
+     "Opening Combine Threshold %",
+     minval=0.01,
+     maxval=1.0,
+     step=0.01,
+     group=open_group_labels)
+
+// Every opening price has its own hard lock and chart-timeframe range.
+// The lock freezes the line and leaves its label at the locked endpoint.
+open_use_h1 = input.bool(true, "", inline="OH1", group=open_group_prices)
+open_h1_text = input.string("00:00", "", inline="OH1", group=open_group_prices)
+open_h1 = input.session("0000-0001", "", inline="OH1", group=open_group_prices)
+open_h1_color = input.color(color.black, "", inline="OH1", group=open_group_prices)
+open_h1_lock = input.session("1600-1601", "Lock", inline="OH1L", group=open_group_prices)
+open_h1_min_tf = input.timeframe("1", "Min TF", inline="OH1L", group=open_group_prices)
+open_h1_max_tf = input.timeframe("60", "Max TF", inline="OH1L", group=open_group_prices)
+
+open_use_h2 = input.bool(true, "", inline="OH2", group=open_group_prices)
+open_h2_text = input.string("6:00", "", inline="OH2", group=open_group_prices)
+open_h2 = input.session("0600-0601", "", inline="OH2", group=open_group_prices)
+open_h2_color = input.color(color.black, "", inline="OH2", group=open_group_prices)
+open_h2_lock = input.session("0900-0901", "Lock", inline="OH2L", group=open_group_prices)
+open_h2_min_tf = input.timeframe("1", "Min TF", inline="OH2L", group=open_group_prices)
+open_h2_max_tf = input.timeframe("60", "Max TF", inline="OH2L", group=open_group_prices)
+
+open_use_h3 = input.bool(true, "", inline="OH3", group=open_group_prices)
+open_h3_text = input.string("10:00", "", inline="OH3", group=open_group_prices)
+open_h3 = input.session("1000-1001", "", inline="OH3", group=open_group_prices)
+open_h3_color = input.color(color.black, "", inline="OH3", group=open_group_prices)
+open_h3_lock = input.session("1130-1131", "Lock", inline="OH3L", group=open_group_prices)
+open_h3_min_tf = input.timeframe("1", "Min TF", inline="OH3L", group=open_group_prices)
+open_h3_max_tf = input.timeframe("60", "Max TF", inline="OH3L", group=open_group_prices)
+
+open_use_h4 = input.bool(true, "", inline="OH4", group=open_group_prices)
+open_h4_text = input.string("2:00", "", inline="OH4", group=open_group_prices)
+open_h4 = input.session("1400-1401", "", inline="OH4", group=open_group_prices)
+open_h4_color = input.color(color.black, "", inline="OH4", group=open_group_prices)
+open_h4_lock = input.session("1600-1601", "Lock", inline="OH4L", group=open_group_prices)
+open_h4_min_tf = input.timeframe("1", "Min TF", inline="OH4L", group=open_group_prices)
+open_h4_max_tf = input.timeframe("60", "Max TF", inline="OH4L", group=open_group_prices)
+
+open_use_h5 = input.bool(true, "", inline="OH5", group=open_group_prices)
+open_h5_text = input.string("8:30", "", inline="OH5", group=open_group_prices)
+open_h5 = input.session("0830-0831", "", inline="OH5", group=open_group_prices)
+open_h5_color = input.color(color.black, "", inline="OH5", group=open_group_prices)
+open_h5_lock = input.session("1130-1131", "Lock", inline="OH5L", group=open_group_prices)
+open_h5_min_tf = input.timeframe("1", "Min TF", inline="OH5L", group=open_group_prices)
+open_h5_max_tf = input.timeframe("60", "Max TF", inline="OH5L", group=open_group_prices)
+
+open_use_h6 = input.bool(true, "", inline="OH6", group=open_group_prices)
+open_h6_text = input.string("9:30", "", inline="OH6", group=open_group_prices)
+open_h6 = input.session("0930-0931", "", inline="OH6", group=open_group_prices)
+open_h6_color = input.color(color.black, "", inline="OH6", group=open_group_prices)
+open_h6_lock = input.session("1600-1601", "Lock", inline="OH6L", group=open_group_prices)
+open_h6_min_tf = input.timeframe("1", "Min TF", inline="OH6L", group=open_group_prices)
+open_h6_max_tf = input.timeframe("60", "Max TF", inline="OH6L", group=open_group_prices)
+
+open_use_h7 = input.bool(true, "", inline="OH7", group=open_group_prices)
+open_h7_text = input.string("1:30", "", inline="OH7", group=open_group_prices)
+open_h7 = input.session("1330-1331", "", inline="OH7", group=open_group_prices)
+open_h7_color = input.color(color.black, "", inline="OH7", group=open_group_prices)
+open_h7_lock = input.session("1600-1601", "Lock", inline="OH7L", group=open_group_prices)
+open_h7_min_tf = input.timeframe("1", "Min TF", inline="OH7L", group=open_group_prices)
+open_h7_max_tf = input.timeframe("60", "Max TF", inline="OH7L", group=open_group_prices)
+
+open_use_h8 = input.bool(false, "", inline="OH8", group=open_group_prices)
+open_h8_text = input.string("00:00", "", inline="OH8", group=open_group_prices)
+open_h8 = input.session("0000-0001", "", inline="OH8", group=open_group_prices)
+open_h8_color = input.color(color.rgb(120, 123, 134), "", inline="OH8", group=open_group_prices)
+open_h8_lock = input.session("1600-1601", "Lock", inline="OH8L", group=open_group_prices)
+open_h8_min_tf = input.timeframe("1", "Min TF", inline="OH8L", group=open_group_prices)
+open_h8_max_tf = input.timeframe("60", "Max TF", inline="OH8L", group=open_group_prices)
+
+open_hz_style_txt = input.string(
+     "Dotted",
+     "Style",
+     options=["Solid", "Dotted", "Dashed"],
+     inline="OH0",
+     group=open_group_prices)
+
+open_hz_width = input.int(
+     1,
+     "",
+     minval=1,
+     maxval=4,
+     inline="OH0",
+     group=open_group_prices)
+
+open_get_line_style(string selection) =>
+    switch selection
+        "Dotted" => line.style_dotted
+        "Dashed" => line.style_dashed
+        => line.style_solid
+
+open_get_text_size(string selection) =>
+    switch selection
+        "Auto"   => size.auto
+        "Huge"   => size.huge
+        "Large"  => size.large
+        "Normal" => size.normal
+        "Small"  => size.small
+        => size.tiny
+
+open_level_label_text(string baseText, float price) =>
+    open_label_price ? str.format("{0} ({1})", baseText, price) : baseText
+
+open_chart_tf_seconds = timeframe.in_seconds(timeframe.period)
+
+open_tf_is_between(string minTf, string maxTf) =>
+    float minSeconds = timeframe.in_seconds(minTf)
+    float maxSeconds = timeframe.in_seconds(maxTf)
+    float lowerBound = math.min(minSeconds, maxSeconds)
+    float upperBound = math.max(minSeconds, maxSeconds)
+    timeframe.isintraday and open_chart_tf_seconds >= lowerBound and open_chart_tf_seconds <= upperBound
+
+open_h1_tf_ok = open_tf_is_between(open_h1_min_tf, open_h1_max_tf)
+open_h2_tf_ok = open_tf_is_between(open_h2_min_tf, open_h2_max_tf)
+open_h3_tf_ok = open_tf_is_between(open_h3_min_tf, open_h3_max_tf)
+open_h4_tf_ok = open_tf_is_between(open_h4_min_tf, open_h4_max_tf)
+open_h5_tf_ok = open_tf_is_between(open_h5_min_tf, open_h5_max_tf)
+open_h6_tf_ok = open_tf_is_between(open_h6_min_tf, open_h6_max_tf)
+open_h7_tf_ok = open_tf_is_between(open_h7_min_tf, open_h7_max_tf)
+open_h8_tf_ok = open_tf_is_between(open_h8_min_tf, open_h8_max_tf)
+
+type OpenTimedMark
+    line levelLine
+    label levelLabel
+    float price
+    int eventTime
+    int lockTime
+    bool locked
+
+type OpenTimedBook
+    OpenTimedMark[] records
+
+type OpenLabelInfo
+    label lbl
+    string baseText
+    float basePrice
+    int created
+    bool active
+
+var OpenTimedBook open_book_one = OpenTimedBook.new(array.new<OpenTimedMark>())
+var OpenTimedBook open_book_two = OpenTimedBook.new(array.new<OpenTimedMark>())
+var OpenTimedBook open_book_three = OpenTimedBook.new(array.new<OpenTimedMark>())
+var OpenTimedBook open_book_four = OpenTimedBook.new(array.new<OpenTimedMark>())
+var OpenTimedBook open_book_five = OpenTimedBook.new(array.new<OpenTimedMark>())
+var OpenTimedBook open_book_six = OpenTimedBook.new(array.new<OpenTimedMark>())
+var OpenTimedBook open_book_seven = OpenTimedBook.new(array.new<OpenTimedMark>())
+var OpenTimedBook open_book_eight = OpenTimedBook.new(array.new<OpenTimedMark>())
+var OpenLabelInfo[] open_master_labels = array.new<OpenLabelInfo>()
+var color open_transparent = #ffffff00
+
+open_one_minute_event(string sessionText) =>
+    bool inWindow = not na(time("", sessionText, open_gmt_tz))
+    bool startsNow = inWindow and not inWindow[1]
+    int latestEventTime = ta.valuewhen(startsNow, time, 0)
+    float latestEventPrice = ta.valuewhen(startsNow, open, 0)
+    [latestEventTime, latestEventPrice]
+
+[open_h1_event_time, open_h1_event_price] = request.security(syminfo.tickerid, "1", open_one_minute_event(open_h1), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+[open_h2_event_time, open_h2_event_price] = request.security(syminfo.tickerid, "1", open_one_minute_event(open_h2), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+[open_h3_event_time, open_h3_event_price] = request.security(syminfo.tickerid, "1", open_one_minute_event(open_h3), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+[open_h4_event_time, open_h4_event_price] = request.security(syminfo.tickerid, "1", open_one_minute_event(open_h4), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+[open_h5_event_time, open_h5_event_price] = request.security(syminfo.tickerid, "1", open_one_minute_event(open_h5), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+[open_h6_event_time, open_h6_event_price] = request.security(syminfo.tickerid, "1", open_one_minute_event(open_h6), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+[open_h7_event_time, open_h7_event_price] = request.security(syminfo.tickerid, "1", open_one_minute_event(open_h7), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+[open_h8_event_time, open_h8_event_price] = request.security(syminfo.tickerid, "1", open_one_minute_event(open_h8), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+
+open_register_label(float price, string baseText, label lbl) =>
+    if not na(lbl) and not na(price)
+        bool alreadyRegistered = false
+        if array.size(open_master_labels) > 0
+            for registryIndex = 0 to array.size(open_master_labels) - 1
+                info = array.get(open_master_labels, registryIndex)
+                if info.lbl == lbl
+                    info.baseText  := baseText
+                    info.basePrice := price
+                    info.active    := true
+                    array.set(open_master_labels, registryIndex, info)
+                    alreadyRegistered := true
+                    break
+
+        if not alreadyRegistered
+            array.push(open_master_labels, OpenLabelInfo.new(lbl, baseText, price, time, true))
+
+open_unregister_label(label lbl) =>
+    if not na(lbl) and array.size(open_master_labels) > 0
+        for registryIndex = 0 to array.size(open_master_labels) - 1
+            info = array.get(open_master_labels, registryIndex)
+            if info.active and info.lbl == lbl
+                info.active := false
+                array.set(open_master_labels, registryIndex, info)
+                break
+
+open_prices_are_close(float firstPrice, float secondPrice) =>
+    if na(firstPrice) or na(secondPrice)
+        false
+    else
+        float referencePrice = math.max(math.max(math.abs(firstPrice), math.abs(secondPrice)), syminfo.mintick)
+        float threshold = referencePrice * (open_combine_threshold / 100.0)
+        float epsilon = syminfo.mintick * 0.001
+        math.abs(firstPrice - secondPrice) <= threshold + epsilon
+
+open_restore_label_texts() =>
+    if array.size(open_master_labels) > 0
+        for registryIndex = 0 to array.size(open_master_labels) - 1
+            info = array.get(open_master_labels, registryIndex)
+            if info.active and not na(info.lbl)
+                price = info.basePrice
+                if na(price)
+                    price := label.get_y(info.lbl)
+                if not na(price)
+                    label.set_y(info.lbl, price)
+                restoredLabelText = open_label_price and not na(price) ? str.format("{0} ({1})", info.baseText, price) : info.baseText
+                label.set_text(info.lbl, restoredLabelText)
+
+// Combine close opening labels while keeping the merged text on the
+// rightmost real label and at a real opening-price level.
+open_combine_persistent_labels() =>
+    if not open_combine_labels
+        open_restore_label_texts()
+        0
+    else
+        open_restore_label_texts()
+
+        tempLabels  = array.new<label>()
+        tempTexts   = array.new_string()
+        tempCreated = array.new_int()
+        tempPrices  = array.new_float()
+        tempX       = array.new_int()
+
+        if array.size(open_master_labels) > 0
+            for registryIndex = 0 to array.size(open_master_labels) - 1
+                info = array.get(open_master_labels, registryIndex)
+                if info.active and not na(info.lbl) and not na(info.basePrice)
+                    labelX = label.get_x(info.lbl)
+                    if not na(labelX)
+                        array.push(tempLabels,  info.lbl)
+                        array.push(tempTexts,   info.baseText)
+                        array.push(tempCreated, info.created)
+                        array.push(tempPrices,  info.basePrice)
+                        array.push(tempX,       labelX)
+
+        labelCount = array.size(tempLabels)
+        if labelCount > 1
+            for sortIndex = 1 to labelCount - 1
+                keyPrice   = array.get(tempPrices,  sortIndex)
+                keyLabel   = array.get(tempLabels,  sortIndex)
+                keyText    = array.get(tempTexts,   sortIndex)
+                keyCreated = array.get(tempCreated, sortIndex)
+                keyX       = array.get(tempX,       sortIndex)
+
+                sortCursor = sortIndex - 1
+                while sortCursor >= 0
+                    if array.get(tempPrices, sortCursor) > keyPrice
+                        array.set(tempPrices,  sortCursor + 1, array.get(tempPrices,  sortCursor))
+                        array.set(tempLabels,  sortCursor + 1, array.get(tempLabels,  sortCursor))
+                        array.set(tempTexts,   sortCursor + 1, array.get(tempTexts,   sortCursor))
+                        array.set(tempCreated, sortCursor + 1, array.get(tempCreated, sortCursor))
+                        array.set(tempX,       sortCursor + 1, array.get(tempX,       sortCursor))
+                        sortCursor -= 1
+                    else
+                        break
+
+                array.set(tempPrices,  sortCursor + 1, keyPrice)
+                array.set(tempLabels,  sortCursor + 1, keyLabel)
+                array.set(tempTexts,   sortCursor + 1, keyText)
+                array.set(tempCreated, sortCursor + 1, keyCreated)
+                array.set(tempX,       sortCursor + 1, keyX)
+
+            clusterIndex = 0
+            while clusterIndex < labelCount
+                previousPrice = array.get(tempPrices, clusterIndex)
+                memberCount   = 1
+                combinedText  = array.get(tempTexts, clusterIndex)
+
+                primaryIndex   = clusterIndex
+                primaryCreated = array.get(tempCreated, clusterIndex)
+                primaryX       = array.get(tempX, clusterIndex)
+
+                members = array.new_int()
+                array.push(members, clusterIndex)
+
+                nextIndex = clusterIndex + 1
+                while nextIndex < labelCount
+                    candidatePrice = array.get(tempPrices, nextIndex)
+                    if not open_prices_are_close(previousPrice, candidatePrice)
+                        break
+
+                    combinedText := combinedText + " / " + array.get(tempTexts, nextIndex)
+                    memberCount += 1
+                    previousPrice := candidatePrice
+
+                    candidateX = array.get(tempX, nextIndex)
+                    candidateCreated = array.get(tempCreated, nextIndex)
+
+                    if (not na(candidateX) and (na(primaryX) or candidateX > primaryX)) or ((not na(candidateX) and not na(primaryX) and candidateX == primaryX) and candidateCreated < primaryCreated)
+                        primaryX       := candidateX
+                        primaryIndex   := nextIndex
+                        primaryCreated := candidateCreated
+                    else if na(primaryX) and candidateCreated < primaryCreated
+                        primaryCreated := candidateCreated
+                        primaryIndex   := nextIndex
+
+                    array.push(members, nextIndex)
+                    nextIndex += 1
+
+                if memberCount > 1
+                    for memberIndex = 0 to array.size(members) - 1
+                        sortedIndex = array.get(members, memberIndex)
+                        currentLabel = array.get(tempLabels, sortedIndex)
+
+                        if sortedIndex == primaryIndex
+                            primaryPrice = array.get(tempPrices, primaryIndex)
+                            mergedText = open_label_price ? str.format("{0} ({1})", combinedText, primaryPrice) : combinedText
+                            label.set_text(currentLabel, mergedText)
+                            if not na(primaryPrice)
+                                label.set_y(currentLabel, primaryPrice)
+                        else
+                            label.set_text(currentLabel, "")
+
+                clusterIndex := nextIndex
+
+        0
+
+open_delete_mark(OpenTimedMark mark) =>
+    if not na(mark.levelLine)
+        line.delete(mark.levelLine)
+    if not na(mark.levelLabel)
+        open_unregister_label(mark.levelLabel)
+        label.delete(mark.levelLabel)
+
+open_trim_book(OpenTimedBook book) =>
+    if not open_unlimited
+        while book.records.size() > open_history_limit
+            OpenTimedMark expired = book.records.pop()
+            open_delete_mark(expired)
+
+open_session_start_minutes(string sessionText) =>
+    int hoursPart = int(str.tonumber(str.substring(sessionText, 0, 2)))
+    int minutesPart = int(str.tonumber(str.substring(sessionText, 2, 4)))
+    hoursPart * 60 + minutesPart
+
+open_lock_time(int openingTime, string lockSession) =>
+    int openingMinute = hour(openingTime, open_gmt_tz) * 60 + minute(openingTime, open_gmt_tz)
+    int lockMinuteOfDay = open_session_start_minutes(lockSession)
+    int targetHour = int(math.floor(lockMinuteOfDay / 60))
+    int targetMinute = lockMinuteOfDay % 60
+    int calendarOffset = lockMinuteOfDay <= openingMinute ? 1 : 0
+    timestamp(open_gmt_tz, year(openingTime, open_gmt_tz), month(openingTime, open_gmt_tz), dayofmonth(openingTime, open_gmt_tz) + calendarOffset, targetHour, targetMinute)
+
+open_endpoint(int eventTime, int lockTime) =>
+    int millisecondsPerBar = int(math.max(1000.0, open_chart_tf_seconds * 1000.0))
+    int projectionBase = math.max(time, eventTime)
+    int bufferedTarget = projectionBase + open_right_buffer * millisecondsPerBar
+    math.max(eventTime, math.min(bufferedTarget, lockTime))
+
+open_label_x(int lockTime) =>
+    int millisecondsPerBar = int(math.max(1000.0, open_chart_tf_seconds * 1000.0))
+    int barsUntilLock = lockTime > time ? int(math.ceil((lockTime - time) / millisecondsPerBar)) : 0
+    bar_index + math.min(open_right_buffer, math.max(barsUntilLock, 0))
+
+open_sync_timed_price(OpenTimedBook book, bool enabled, int eventTime, float eventPrice, string levelText, color levelColor, string lockSession) =>
+    if enabled and not na(eventTime) and not na(eventPrice)
+        bool unseenEvent = book.records.size() == 0
+        if not unseenEvent
+            OpenTimedMark latest = book.records.get(0)
+            unseenEvent := latest.eventTime != eventTime
+
+        if unseenEvent
+            int lockTime = open_lock_time(eventTime, lockSession)
+            int firstEndpoint = open_endpoint(eventTime, lockTime)
+            int firstLabelX = open_label_x(lockTime)
+            line newLine = line.new(eventTime, eventPrice, firstEndpoint, eventPrice, xloc=xloc.bar_time, style=open_get_line_style(open_hz_style_txt), width=open_hz_width, color=levelColor)
+            label newLabel = label.new(firstLabelX, eventPrice, open_level_label_text(levelText, eventPrice), xloc=xloc.bar_index, style=label.style_label_left, color=open_transparent, textcolor=open_txt_color, size=open_get_text_size(open_label_size_txt))
+            OpenTimedMark mark = OpenTimedMark.new(newLine, newLabel, eventPrice, eventTime, lockTime, false)
+            book.records.unshift(mark)
+            open_register_label(eventPrice, levelText, newLabel)
+            open_trim_book(book)
+
+        if book.records.size() > 0
+            for index = 0 to book.records.size() - 1
+                OpenTimedMark mark = book.records.get(index)
+                if not mark.locked
+                    int endpoint = open_endpoint(mark.eventTime, mark.lockTime)
+                    int labelX = open_label_x(mark.lockTime)
+                    line.set_x2(mark.levelLine, endpoint)
+                    line.set_color(mark.levelLine, levelColor)
+                    line.set_style(mark.levelLine, open_get_line_style(open_hz_style_txt))
+                    line.set_width(mark.levelLine, open_hz_width)
+                    label.set_x(mark.levelLabel, labelX)
+                    label.set_y(mark.levelLabel, mark.price)
+                    label.set_text(mark.levelLabel, open_level_label_text(levelText, mark.price))
+                    label.set_textcolor(mark.levelLabel, open_txt_color)
+                    label.set_size(mark.levelLabel, open_get_text_size(open_label_size_txt))
+
+                    if time >= mark.lockTime
+                        mark.locked := true
+                    book.records.set(index, mark)
+
+open_render_prices() =>
+    open_sync_timed_price(open_book_one, open_use_h1 and open_h1_tf_ok, open_h1_event_time, open_h1_event_price, open_h1_text, open_h1_color, open_h1_lock)
+    open_sync_timed_price(open_book_two, open_use_h2 and open_h2_tf_ok, open_h2_event_time, open_h2_event_price, open_h2_text, open_h2_color, open_h2_lock)
+    open_sync_timed_price(open_book_three, open_use_h3 and open_h3_tf_ok, open_h3_event_time, open_h3_event_price, open_h3_text, open_h3_color, open_h3_lock)
+    open_sync_timed_price(open_book_four, open_use_h4 and open_h4_tf_ok, open_h4_event_time, open_h4_event_price, open_h4_text, open_h4_color, open_h4_lock)
+    open_sync_timed_price(open_book_five, open_use_h5 and open_h5_tf_ok, open_h5_event_time, open_h5_event_price, open_h5_text, open_h5_color, open_h5_lock)
+    open_sync_timed_price(open_book_six, open_use_h6 and open_h6_tf_ok, open_h6_event_time, open_h6_event_price, open_h6_text, open_h6_color, open_h6_lock)
+    open_sync_timed_price(open_book_seven, open_use_h7 and open_h7_tf_ok, open_h7_event_time, open_h7_event_price, open_h7_text, open_h7_color, open_h7_lock)
+    open_sync_timed_price(open_book_eight, open_use_h8 and open_h8_tf_ok, open_h8_event_time, open_h8_event_price, open_h8_text, open_h8_color, open_h8_lock)
+
+open_render_prices()
+
+if barstate.islast
+    open_combine_persistent_labels()
+
+// ============================================================================
+// ================ REORGANIZED: OPENING RANGE BAR ===========================
+// ============================================================================
+// This is the independent Opening Range bracket from the original macro module.
+isOpeningRangeTF = timeframe.isminutes and timeframe.multiplier >= 1 and timeframe.multiplier <= 5
+oneBarMS = time_close - time
+noColor = color.new(#ffffff, 100)
+
+orGroup            = "Opening Range Bar"
+showOpeningRange   = input.bool(false, "Show Opening Range", group=orGroup)
+openingRangeTime   = input.session("0930-1000", "Range Time", group=orGroup, tooltip="Default is 9:30 AM-10:00 AM. Times use the selected time zone.")
+orTimezoneInput    = input.string("America/New_York", "Time Zone", options=["America/New_York", "America/Chicago", "Europe/London", "Etc/UTC", "Exchange"], group=orGroup)
+orWeekdaysOnly     = input.bool(false, "Weekdays Only", group=orGroup)
+orLabelText        = input.string("", "Label", group=orGroup)
+orShowLabel        = input.bool(false, "Show Label", inline="orLabel", group=orGroup)
+orShowTime         = input.bool(false, "Include Time", inline="orLabel", group=orGroup)
+orColor            = input.color(color.rgb(74, 74, 74), "Color", inline="orLine", group=orGroup)
+orLineStyleInput   = input.string("Solid", "Style", options=["Solid", "Dashed", "Dotted"], inline="orLine", group=orGroup)
+orLineWidth        = input.int(1, "Width", minval=1, maxval=4, inline="orLine", group=orGroup)
+orShowProjections  = input.bool(false, "Edge Projections", group=orGroup, tooltip="Draws dotted lines from the candles to the two ends of the Opening Range bracket.")
+orVerticalOffset   = input.int(50, "Vertical Offset (ticks)", minval=1, group=orGroup)
+orLegLength        = input.int(10, "Bracket Leg Length (ticks)", minval=1, group=orGroup)
+orLabelSize        = input.string(size.small, "Label Size", options=[size.tiny, size.small, size.normal, size.large], group=orGroup)
+orMaxDays          = input.int(10, "Days To Keep", minval=1, maxval=50, group=orGroup)
+
+string openingRangeTimezone = orTimezoneInput == "Exchange" ? syminfo.timezone : orTimezoneInput
+string openingRangeSession  = openingRangeTime + (orWeekdaysOnly ? ":23456" : ":1234567")
+bool openingRangeActive     = not na(time(timeframe.period, openingRangeSession, openingRangeTimezone))
+int openingRangeLookback    = isOpeningRangeTF ? math.max(1, int(math.ceil(timeframe.in_seconds("15") / timeframe.in_seconds(timeframe.period)))) : 1
+float openingRangeTop       = ta.highest(high, openingRangeLookback) + syminfo.mintick * orVerticalOffset
+string openingRangeClock    = str.substring(openingRangeTime, 0, 2) + ":" + str.substring(openingRangeTime, 2, 4) + " - " + str.substring(openingRangeTime, 5, 7) + ":" + str.substring(openingRangeTime, 7, 9)
+string openingRangeLabel    = orShowTime ? orLabelText + " " + openingRangeClock : orLabelText
+string orLineStyle = switch orLineStyleInput
+    "Dashed" => line.style_dashed
+    "Dotted" => line.style_dotted
+    => line.style_solid
+
+var line[]  OPENING_RANGE_LINES  = array.new_line()
+var line[]  OPENING_RANGE_EXT    = array.new_line()
+var label[] OPENING_RANGE_LABELS = array.new_label()
+
+openingRangeBar(line[] lines, line[] projections, label[] labels, bool active) =>
+    float leg = syminfo.mintick * orLegLength
+    float pad = syminfo.mintick * orVerticalOffset
+
+    if bar_index > 0 and not active[1] and active
+        line startLeg = line.new(time, openingRangeTop - leg, time, openingRangeTop, xloc=xloc.bar_time, color=orColor, style=orLineStyle, width=orLineWidth)
+        line topLine  = line.new(time, openingRangeTop, time + oneBarMS, openingRangeTop, xloc=xloc.bar_time, color=orColor, style=orLineStyle, width=orLineWidth)
+        lines.push(startLeg)
+        lines.push(topLine)
+
+        if orShowProjections
+            projections.push(line.new(time, high, time, openingRangeTop, xloc=xloc.bar_time, color=orColor, style=line.style_dotted, width=orLineWidth))
+
+        labels.push(label.new(time, openingRangeTop, orShowLabel ? openingRangeLabel : "", tooltip=openingRangeLabel, xloc=xloc.bar_time, style=label.style_label_down, color=noColor, textcolor=orColor, size=orLabelSize))
+
+    if active and lines.size() >= 2 and labels.size() > 0
+        line startLeg = lines.get(lines.size() - 2)
+        line topLine  = lines.last()
+        label rangeLabel = labels.last()
+        float newTop = math.max(topLine.get_y1(), high + pad)
+
+        startLeg.set_y1(newTop - leg)
+        startLeg.set_y2(newTop)
+        startLeg.set_color(orColor)
+        startLeg.set_style(orLineStyle)
+        startLeg.set_width(orLineWidth)
+
+        topLine.set_y1(newTop)
+        topLine.set_y2(newTop)
+        topLine.set_x2(time + oneBarMS)
+        topLine.set_color(orColor)
+        topLine.set_style(orLineStyle)
+        topLine.set_width(orLineWidth)
+
+        rangeLabel.set_x(math.round(math.avg(startLeg.get_x1(), time + oneBarMS)))
+        rangeLabel.set_y(newTop)
+        rangeLabel.set_text(orShowLabel ? openingRangeLabel : "")
+        rangeLabel.set_textcolor(orColor)
+        rangeLabel.set_size(orLabelSize)
+
+        if orShowProjections and projections.size() > 0
+            projections.last().set_y1(high)
+            projections.last().set_y2(newTop)
+            projections.last().set_color(orColor)
+            projections.last().set_width(orLineWidth)
+
+    if bar_index > 0 and active[1] and not active and lines.size() >= 2 and labels.size() > 0
+        line topLine = lines.last()
+        float finalTop = topLine.get_y1()
+        line endLeg = line.new(time, finalTop - leg, time, finalTop, xloc=xloc.bar_time, color=orColor, style=orLineStyle, width=orLineWidth)
+        lines.push(endLeg)
+
+        labels.last().set_x(math.round(math.avg(lines.get(lines.size() - 3).get_x1(), time)))
+        labels.last().set_y(finalTop)
+
+        if orShowProjections
+            projections.push(line.new(time, high[1], time, finalTop, xloc=xloc.bar_time, color=orColor, style=line.style_dotted, width=orLineWidth))
+
+    // Each completed bracket has three lines, up to two projections, and one label.
+    while labels.size() > orMaxDays
+        labels.shift().delete()
+        for i = 0 to 2
+            if lines.size() > 0
+                lines.shift().delete()
+        for i = 0 to 1
+            if projections.size() > 0
+                projections.shift().delete()
+
+
+// The Opening Range bracket is rendered on minute chart timeframes from 1
+// through 5 minutes.
+if showOpeningRange and isOpeningRangeTF
+    openingRangeBar(OPENING_RANGE_LINES, OPENING_RANGE_EXT, OPENING_RANGE_LABELS, openingRangeActive)
+
+// ============================================================================
+// ======================= BANDZ SESSION RANGE ENGINE =========================
+// ============================================================================
+// Original Bandz implementation of the author's configurable session-range,
+// pivot, mitigation, alert, and range-statistics rules. This implementation
+// does not import or reuse third-party Pine source.
+
+bandz_session_line_style(string selection) =>
+    switch selection
+        "Dashed" => line.style_dashed
+        "Dotted" => line.style_dotted
+        => line.style_solid
+
+bandz_session_text_size(string selection) =>
+    switch selection
+        "Auto"   => size.auto
+        "Huge"   => size.huge
+        "Large"  => size.large
+        "Normal" => size.normal
+        "Small"  => size.small
+        => size.tiny
+
+bandz_session_table_position(string selection) =>
+    result = position.top_right
+    if selection == "Top Left"
+        result := position.top_left
+    else if selection == "Top Center"
+        result := position.top_center
+    else if selection == "Middle Right"
+        result := position.middle_right
+    else if selection == "Middle Left"
+        result := position.middle_left
+    else if selection == "Middle Center"
+        result := position.middle_center
+    else if selection == "Bottom Right"
+        result := position.bottom_right
+    else if selection == "Bottom Left"
+        result := position.bottom_left
+    else if selection == "Bottom Center"
+        result := position.bottom_center
+    result
+
+// ---------------------------------------- Inputs --------------------------------------------------
+var g_SETTINGS      = "Settings"
+max_days            = input.int(1, "Session Drawing Limit", minval = 1, maxval = 4, tooltip = "Keeps up to four complete drawings per session. The cap covers all seven session books together and leaves drawing headroom for ORG and Opening Range objects under TradingView's 500-object limits.", group = g_SETTINGS)
+tf_limit            = input.timeframe("60", "Timeframe Limit", tooltip = "Drawings will not appear on timeframes greater than or equal to this", group = g_SETTINGS)
+gmt_tz              = input.string('America/New_York', "Timezone", options = ['America/New_York','GMT-12','GMT-11','GMT-10','GMT-9','GMT-8','GMT-7','GMT-6','GMT-5','GMT-4','GMT-3','GMT-2','GMT-1','GMT+0','GMT+1','GMT+2','GMT+3','GMT+4','GMT+5','GMT+6','GMT+7','GMT+8','GMT+9','GMT+10','GMT+11','GMT+12','GMT+13','GMT+14'], tooltip = "Note GMT is not adjusted to reflect Daylight Saving Time changes", group = g_SETTINGS)
+lbl_size            = bandz_session_text_size(input.string('Tiny', "Label Size", options = ['Auto', 'Tiny', 'Small', 'Normal', 'Large', 'Huge'], tooltip = "The size of all labels", group = g_SETTINGS))
+txt_color           = input.color(color.black, "Text Color", tooltip = "The color of all label and table text", group = g_SETTINGS)
+use_cutoff          = input.bool(true, "Killzone Pivot Cutoff", inline = "CO", tooltip = "When enabled, active killzone pivot lines stop extending at this time.", group = g_SETTINGS)
+cutoff              = input.session("1600-1601", "", inline = "CO", group = g_SETTINGS)
+
+var g_KZ            = "Killzones"
+show_kz_text        = input.bool(false, "Display Text in Boxes", group = g_KZ)
+
+// Individual killzone box toggles and transparencies
+show_asia_box       = input.bool(true, "Show Asia Box", inline = "ASIA_BOX", group = g_KZ)
+asia_box_transp     = input.int(95, "", 0, 100, inline = "ASIA_BOX", group = g_KZ)
+
+show_london_box     = input.bool(true, "Show London Box", inline = "LONDON_BOX", group = g_KZ)
+london_box_transp   = input.int(95, "", 0, 100, inline = "LONDON_BOX", group = g_KZ)
+
+show_nyam_box       = input.bool(true, "Show Opening Range Box", inline = "NYAM_BOX", group = g_KZ)
+nyam_box_transp     = input.int(100, "", 0, 100, inline = "NYAM_BOX", group = g_KZ)
+
+show_nylu_box       = input.bool(false, "Show NY Lunch Box", inline = "NYLU_BOX", group = g_KZ)
+nylu_box_transp     = input.int(97, "", 0, 100, inline = "NYLU_BOX", group = g_KZ)
+
+show_nypm_box       = input.bool(true, "Show Pre-Market Box", inline = "NYPM_BOX", group = g_KZ)
+nypm_box_transp     = input.int(100, "", 0, 100, inline = "NYPM_BOX", group = g_KZ)
+
+show_kz6_box        = input.bool(false, "Show Killzone 6 Box", inline = "KZ6_BOX", group = g_KZ)
+kz6_box_transp      = input.int(91, "", 0, 100, inline = "KZ6_BOX", group = g_KZ)
+
+show_kz7_box        = input.bool(false, "Show Killzone 7 Box", inline = "KZ7_BOX", group = g_KZ)
+kz7_box_transp      = input.int(91, "", 0, 100, inline = "KZ7_BOX", group = g_KZ)
+
+text_transparency   = input.int(0, "Text Transparency", 0, 100, group = g_KZ)
+
+// Killzone sessions
+use_asia            = input.bool(true, "", inline = "ASIA", group = g_KZ)
+as_txt              = input.string("Asia", "", inline = "ASIA", group = g_KZ)
+asia                = input.session("1800-0000", "", inline = "ASIA", group = g_KZ)
+as_color            = input.color(color.rgb(128, 25, 34), "", inline = "ASIA", group = g_KZ)
+
+use_london          = input.bool(true, "", inline = "LONDON", group = g_KZ)
+lo_txt              = input.string("London", "", inline = "LONDON", group = g_KZ)
+london              = input.session("0130-0500", "", inline = "LONDON", group = g_KZ)
+lo_color            = input.color(color.rgb(12, 50, 153), "", inline = "LONDON", group = g_KZ)
+
+use_nyam            = input.bool(true, "", inline = "NYAM", group = g_KZ)
+na_txt              = input.string("Opening Range", "", inline = "NYAM", group = g_KZ)
+nyam                = input.session("0930-1000", "", inline = "NYAM", group = g_KZ)
+na_color            = input.color(color.black, "", inline = "NYAM", group = g_KZ)
+
+use_nylu            = input.bool(false, "", inline = "NYLU", group = g_KZ)
+nl_txt              = input.string("NY Lunch", "", inline = "NYLU", group = g_KZ)
+nylu                = input.session("1130-1330", "", inline = "NYLU", group = g_KZ)
+nl_color            = input.color(color.black, "", inline = "NYLU", group = g_KZ)
+
+use_nypm            = input.bool(true, "", inline = "NYPM", group = g_KZ)
+np_txt              = input.string("Pre-Market", "", inline = "NYPM", group = g_KZ)
+nypm                = input.session("0700-0925", "", inline = "NYPM", group = g_KZ)
+np_color            = input.color(color.black, "", inline = "NYPM", group = g_KZ)
+
+use_kz6             = input.bool(false, "", inline = "KZ6", group = g_KZ)
+k6_txt              = input.string("NY PM", "", inline = "KZ6", group = g_KZ)
+kz6                 = input.session("1330-1600", "", inline = "KZ6", group = g_KZ)
+k6_color            = input.color(color.rgb(54, 58, 69), "", inline = "KZ6", group = g_KZ)
+
+use_kz7             = input.bool(false, "", inline = "KZ7", group = g_KZ)
+k7_txt              = input.string("Midnight", "", inline = "KZ7", group = g_KZ)
+kz7                 = input.session("0000-0030", "", inline = "KZ7", group = g_KZ)
+k7_color            = input.color(color.rgb(54, 58, 69), "", inline = "KZ7", group = g_KZ)
+
+
+var g_LABELS        = "Killzone Pivots"
+show_pivots         = input.bool(true, "Master Pivots", inline = "PV", group = g_LABELS)
+use_alerts          = input.bool(false, "Alert Broken Pivots", inline = "PV", tooltip = "The desired killzone and its individual high/low option must be enabled when the alert is created.", group = g_LABELS)
+show_midpoints      = input.bool(true, "Show Pivot Midpoints", inline = "mp", group = g_LABELS)
+stop_midpoints      = input.bool(true, "Stop Once Mitigated", inline = "mp", group = g_LABELS)
+show_labels         = input.bool(true, "Master Pivot Labels", inline = "LB", tooltip = "Master switch for all killzone high/low labels. Each killzone also has its own label switch below.", group = g_LABELS)
+label_price         = input.bool(false, "Display Price", inline = "LB", group = g_LABELS)
+label_right         = input.bool(true, "Right Side", inline = "LB", group = g_LABELS)
+ext_pivots          = input.string("Until Mitigated", "Extend Pivots...", options = ['Until Mitigated', 'Past Mitigation'], group = g_LABELS)
+ext_which           = input.string("Most Recent", "...From Which Sessions", options = ['Most Recent', 'All'], group = g_LABELS)
+
+// Each killzone can independently draw its high/low lines and labels.
+show_asia_pivots    = input.bool(false, "Asia High / Low", inline = "KZ_AS", group = g_LABELS)
+show_asia_labels    = input.bool(false, "Labels", inline = "KZ_AS", group = g_LABELS)
+
+show_london_pivots  = input.bool(false, "London High / Low", inline = "KZ_LO", group = g_LABELS)
+show_london_labels  = input.bool(false, "Labels", inline = "KZ_LO", group = g_LABELS)
+
+show_nyam_pivots    = input.bool(true, "Opening Range High / Low", inline = "KZ_OR", group = g_LABELS)
+show_nyam_labels    = input.bool(false, "Labels", inline = "KZ_OR", group = g_LABELS)
+
+show_nylu_pivots    = input.bool(false, "NY Lunch High / Low", inline = "KZ_LU", group = g_LABELS)
+show_nylu_labels    = input.bool(false, "Labels", inline = "KZ_LU", group = g_LABELS)
+
+show_nypm_pivots    = input.bool(true, "Pre-Market High / Low", inline = "KZ_PM", group = g_LABELS)
+show_nypm_labels    = input.bool(false, "Labels", inline = "KZ_PM", group = g_LABELS)
+
+show_kz6_pivots     = input.bool(false, "Killzone 6 High / Low", inline = "KZ_6", group = g_LABELS)
+show_kz6_labels     = input.bool(false, "Labels", inline = "KZ_6", group = g_LABELS)
+
+show_kz7_pivots     = input.bool(false, "Killzone 7 High / Low", inline = "KZ_7", group = g_LABELS)
+show_kz7_labels     = input.bool(false, "Labels", inline = "KZ_7", group = g_LABELS)
+
+ash_str             = input.string("AS.H", "Asia Labels", inline = "L_AS", group = g_LABELS)
+asl_str             = input.string("AS.L", "", inline = "L_AS", group = g_LABELS)
+
+loh_str             = input.string("LO.H", "London Labels", inline = "L_LO", group = g_LABELS)
+lol_str             = input.string("LO.L", "", inline = "L_LO", group = g_LABELS)
+
+nah_str             = input.string("OR.H", "Opening Range Labels", inline = "L_NA", group = g_LABELS)
+nal_str             = input.string("OR.L", "", inline = "L_NA", group = g_LABELS)
+
+nlh_str             = input.string("Lch.H", "NY Lunch Labels", inline = "L_NL", group = g_LABELS)
+nll_str             = input.string("Lch.L", "", inline = "L_NL", group = g_LABELS)
+
+nph_str             = input.string("Pre.H", "Pre-Market Labels", inline = "L_NP", group = g_LABELS)
+npl_str             = input.string("Pre.L", "", inline = "L_NP", group = g_LABELS)
+
+k6h_str             = input.string("K6.H", "Killzone 6 Labels", inline = "L_K6", group = g_LABELS)
+k6l_str             = input.string("K6.L", "", inline = "L_K6", group = g_LABELS)
+
+k7h_str             = input.string("K7.H", "Killzone 7 Labels", inline = "L_K7", group = g_LABELS)
+k7l_str             = input.string("K7.L", "", inline = "L_K7", group = g_LABELS)
+
+kzp_style           = bandz_session_line_style(input.string(defval = 'Solid', title = "Pivot Style", options = ['Solid', 'Dotted', 'Dashed'], inline = "KZP", group = g_LABELS))
+kzp_width           = input.int(1, "", inline = "KZP", group = g_LABELS)
+kzm_style           = bandz_session_line_style(input.string(defval = 'Dashed', title = "Midpoint Style", options = ['Solid', 'Dotted', 'Dashed'], inline = "KZM", group = g_LABELS))
+kzm_width           = input.int(1, "", inline = "KZM", group = g_LABELS)
+
+
+var g_RNG           = "Killzone Range"
+show_range          = input.bool(false, "Show Killzone Range", tooltip = "Show the most recent ranges of each selected killzone, from high to low", group = g_RNG)
+show_range_avg      = input.bool(false, "Show Average", tooltip = "Show the average range of each selected killzone", group = g_RNG)
+range_avg           = input.int(5, "Average Length", 0, tooltip = "This many previous sessions will be used to calculate the average. If there isn't enough data on the current chart, it will use as many sessions as possible", group = g_RNG)
+range_pos           = bandz_session_table_position(input.string('Top Right', "Table Position", options = ['Bottom Center', 'Bottom Left', 'Bottom Right', 'Middle Center', 'Middle Left', 'Middle Right', 'Top Center', 'Top Left', 'Top Right'], group = g_RNG))
+range_size          = bandz_session_text_size(input.string('Normal', "Table Size", options = ['Auto', 'Tiny', 'Small', 'Normal', 'Large', 'Huge'], group = g_RNG))
+
+// ---------------------------------------- State --------------------------------------------------
+// A drawing record owns every object and validity flag for one completed or
+// forming session. Keeping the objects together prevents history arrays from
+// drifting out of alignment when a record is removed.
+type BandzSessionDrawing
+    box rangeBox
+    line highLine
+    line midpointLine
+    line lowLine
+    label highLabel
+    label lowLabel
+    bool highActive
+    bool midpointActive
+    bool lowActive
+    float highValue
+    float lowValue
+    float currentRange
+    string highText
+    string lowText
+
+type BandzSessionBook
+    string title
+    BandzSessionDrawing[] history
+    float[] completedRanges
+
+var BandzSessionBook asiaBook = BandzSessionBook.new(as_txt, array.new<BandzSessionDrawing>(), array.new_float())
+var BandzSessionBook londonBook = BandzSessionBook.new(lo_txt, array.new<BandzSessionDrawing>(), array.new_float())
+var BandzSessionBook openingRangeBook = BandzSessionBook.new(na_txt, array.new<BandzSessionDrawing>(), array.new_float())
+var BandzSessionBook lunchBook = BandzSessionBook.new(nl_txt, array.new<BandzSessionDrawing>(), array.new_float())
+var BandzSessionBook premarketBook = BandzSessionBook.new(np_txt, array.new<BandzSessionDrawing>(), array.new_float())
+var BandzSessionBook sessionSixBook = BandzSessionBook.new(k6_txt, array.new<BandzSessionDrawing>(), array.new_float())
+var BandzSessionBook sessionSevenBook = BandzSessionBook.new(k7_txt, array.new<BandzSessionDrawing>(), array.new_float())
+
+t_as = not na(time("", asia, gmt_tz))
+t_lo = not na(time("", london, gmt_tz))
+t_na = not na(time("", nyam, gmt_tz))
+t_nl = not na(time("", nylu, gmt_tz))
+t_np = not na(time("", nypm, gmt_tz))
+t_k6 = not na(time("", kz6, gmt_tz))
+t_k7 = not na(time("", kz7, gmt_tz))
+t_co = not na(time("", cutoff, gmt_tz))
+
+var color bandz_session_transparent = #ffffff00
+bool bandz_only_latest = ext_which == "Most Recent"
+bool bandz_extend_after_touch = ext_pivots == "Past Mitigation"
+bool bandz_session_timeframe_allowed = timeframe.in_seconds("") < timeframe.in_seconds(tf_limit)
+
+bandz_session_fill(color baseColor, int transparency) =>
+    color.new(baseColor, transparency)
+
+bandz_session_text_color(color baseColor) =>
+    color.new(baseColor, text_transparency)
+
+bandz_session_label_text(string baseText, float price) =>
+    label_price ? str.format("{0} ({1})", baseText, price) : baseText
+
+bandz_delete_session_drawing(BandzSessionDrawing drawing) =>
+    if not na(drawing.rangeBox)
+        box.delete(drawing.rangeBox)
+    if not na(drawing.highLine)
+        line.delete(drawing.highLine)
+    if not na(drawing.midpointLine)
+        line.delete(drawing.midpointLine)
+    if not na(drawing.lowLine)
+        line.delete(drawing.lowLine)
+    if not na(drawing.highLabel)
+        label.delete(drawing.highLabel)
+    if not na(drawing.lowLabel)
+        label.delete(drawing.lowLabel)
+
+bandz_trim_session_history(BandzSessionBook book) =>
+    while book.history.size() > max_days
+        BandzSessionDrawing expired = book.history.pop()
+        bandz_delete_session_drawing(expired)
+
+bandz_update_forming_session(BandzSessionBook book, bool active, bool drawPivots, bool drawLabels) =>
+    if active and book.history.size() > 0
+        BandzSessionDrawing drawing = book.history.get(0)
+        bool madeNewHigh = high > drawing.highValue
+        bool madeNewLow = low < drawing.lowValue
+
+        drawing.highValue := math.max(drawing.highValue, high)
+        drawing.lowValue := math.min(drawing.lowValue, low)
+        drawing.currentRange := drawing.highValue - drawing.lowValue
+
+        if not na(drawing.rangeBox)
+            box.set_right(drawing.rangeBox, time)
+            box.set_top(drawing.rangeBox, drawing.highValue)
+            box.set_bottom(drawing.rangeBox, drawing.lowValue)
+
+        if drawPivots and not na(drawing.highLine) and not na(drawing.lowLine)
+            if madeNewHigh
+                line.set_xy1(drawing.highLine, time, drawing.highValue)
+                line.set_xy2(drawing.highLine, time, drawing.highValue)
+            else
+                line.set_x2(drawing.highLine, time)
+
+            if madeNewLow
+                line.set_xy1(drawing.lowLine, time, drawing.lowValue)
+                line.set_xy2(drawing.lowLine, time, drawing.lowValue)
+            else
+                line.set_x2(drawing.lowLine, time)
+
+            if not na(drawing.midpointLine)
+                float midpoint = math.avg(drawing.highValue, drawing.lowValue)
+                line.set_xy1(drawing.midpointLine, time, midpoint)
+                line.set_xy2(drawing.midpointLine, time, midpoint)
+
+        if drawLabels and not na(drawing.highLabel) and not na(drawing.lowLabel)
+            if label_right
+                label.set_x(drawing.highLabel, time)
+                label.set_x(drawing.lowLabel, time)
+            if madeNewHigh
+                label.set_xy(drawing.highLabel, time, drawing.highValue)
+                label.set_text(drawing.highLabel, bandz_session_label_text(drawing.highText, drawing.highValue))
+            if madeNewLow
+                label.set_xy(drawing.lowLabel, time, drawing.lowValue)
+                label.set_text(drawing.lowLabel, bandz_session_label_text(drawing.lowText, drawing.lowValue))
+
+        book.history.set(0, drawing)
+
+bandz_update_completed_sessions(BandzSessionBook book, bool active, bool wasActive, bool drawPivots, bool drawLabels) =>
+    if not active and wasActive and book.history.size() > 0 and range_avg > 0
+        BandzSessionDrawing completed = book.history.get(0)
+        book.completedRanges.unshift(completed.currentRange)
+        while book.completedRanges.size() > range_avg
+            book.completedRanges.pop()
+
+    if drawPivots and book.history.size() > 0
+        int recordsToUpdate = bandz_only_latest ? math.min(1, book.history.size()) : book.history.size()
+        if recordsToUpdate > 0
+            for index = 0 to recordsToUpdate - 1
+                BandzSessionDrawing drawing = book.history.get(index)
+
+                if not na(drawing.highLine)
+                    if bandz_extend_after_touch or drawing.highActive
+                        line.set_x2(drawing.highLine, time)
+                        if drawLabels and label_right and not na(drawing.highLabel)
+                            label.set_x(drawing.highLabel, time)
+
+                    if drawing.highActive and high > drawing.highValue
+                        drawing.highActive := false
+                        if use_alerts and index == 0
+                            alert("Broke " + book.title + " High", alert.freq_once_per_bar)
+                        if drawLabels and label_right and not na(drawing.highLabel)
+                            label.set_style(drawing.highLabel, label.style_label_down)
+                    else if drawing.highActive and use_cutoff and t_co
+                        drawing.highActive := false
+
+                if not na(drawing.lowLine)
+                    if bandz_extend_after_touch or drawing.lowActive
+                        line.set_x2(drawing.lowLine, time)
+                        if drawLabels and label_right and not na(drawing.lowLabel)
+                            label.set_x(drawing.lowLabel, time)
+
+                    if drawing.lowActive and low < drawing.lowValue
+                        drawing.lowActive := false
+                        if use_alerts and index == 0
+                            alert("Broke " + book.title + " Low", alert.freq_once_per_bar)
+                        if drawLabels and label_right and not na(drawing.lowLabel)
+                            label.set_style(drawing.lowLabel, label.style_label_up)
+                    else if drawing.lowActive and use_cutoff and t_co
+                        drawing.lowActive := false
+
+                if not active and not na(drawing.midpointLine) and (not stop_midpoints or drawing.midpointActive)
+                    line.set_x2(drawing.midpointLine, time)
+                    float midpoint = line.get_y1(drawing.midpointLine)
+                    if drawing.midpointActive and low <= midpoint and high >= midpoint
+                        drawing.midpointActive := false
+
+                book.history.set(index, drawing)
+
+bandz_begin_session(BandzSessionBook book, color sessionColor, string boxText, string highText, string lowText, bool showBox, int boxTransparency, bool drawPivots, bool drawLabels) =>
+    color fillColor = bandz_session_fill(sessionColor, boxTransparency)
+    color boxTextColor = bandz_session_text_color(sessionColor)
+    box rangeBox = na
+    if showBox
+        rangeBox := box.new(time, high, time, low, xloc = xloc.bar_time, border_color = fillColor, bgcolor = fillColor, text = show_kz_text ? boxText : na, text_color = boxTextColor)
+
+    line highLine = na
+    line midpointLine = na
+    line lowLine = na
+    label highLabel = na
+    label lowLabel = na
+
+    if drawPivots
+        highLine := line.new(time, high, time, high, xloc = xloc.bar_time, style = kzp_style, color = sessionColor, width = kzp_width)
+        lowLine := line.new(time, low, time, low, xloc = xloc.bar_time, style = kzp_style, color = sessionColor, width = kzp_width)
+        if show_midpoints
+            float midpoint = math.avg(high, low)
+            midpointLine := line.new(time, midpoint, time, midpoint, xloc = xloc.bar_time, style = kzm_style, color = sessionColor, width = kzm_width)
+
+        if drawLabels
+            string initialHighText = bandz_session_label_text(highText, high)
+            string initialLowText = bandz_session_label_text(lowText, low)
+            if label_right
+                highLabel := label.new(time, high, initialHighText, xloc = xloc.bar_time, color = bandz_session_transparent, textcolor = txt_color, style = label.style_label_left, size = lbl_size)
+                lowLabel := label.new(time, low, initialLowText, xloc = xloc.bar_time, color = bandz_session_transparent, textcolor = txt_color, style = label.style_label_left, size = lbl_size)
+            else
+                highLabel := label.new(time, high, initialHighText, xloc = xloc.bar_time, color = bandz_session_transparent, textcolor = txt_color, style = label.style_label_down, size = lbl_size)
+                lowLabel := label.new(time, low, initialLowText, xloc = xloc.bar_time, color = bandz_session_transparent, textcolor = txt_color, style = label.style_label_up, size = lbl_size)
+
+    BandzSessionDrawing drawing = BandzSessionDrawing.new(rangeBox, highLine, midpointLine, lowLine, highLabel, lowLabel, true, true, true, high, low, high - low, highText, lowText)
+    book.history.unshift(drawing)
+    bandz_trim_session_history(book)
+
+bandz_manage_session(BandzSessionBook book, bool enabled, bool inSession, color sessionColor, string boxText, string highText, string lowText, bool showBox, int boxTransparency, bool sessionPivots, bool sessionLabels) =>
+    bool drawPivots = show_pivots and sessionPivots
+    bool drawLabels = drawPivots and show_labels and sessionLabels
+    bool activeNow = bandz_session_timeframe_allowed and enabled and inSession
+    bool activeBefore = bandz_session_timeframe_allowed and enabled and inSession[1]
+
+    if activeNow and not inSession[1]
+        bandz_begin_session(book, sessionColor, boxText, highText, lowText, showBox, boxTransparency, drawPivots, drawLabels)
+
+    bandz_update_forming_session(book, activeNow, drawPivots, drawLabels)
+    bandz_update_completed_sessions(book, activeNow, activeBefore, drawPivots, drawLabels)
+
+bandz_manage_session(asiaBook, use_asia, t_as, as_color, as_txt, ash_str, asl_str, show_asia_box, asia_box_transp, show_asia_pivots, show_asia_labels)
+bandz_manage_session(londonBook, use_london, t_lo, lo_color, lo_txt, loh_str, lol_str, show_london_box, london_box_transp, show_london_pivots, show_london_labels)
+bandz_manage_session(openingRangeBook, use_nyam, t_na, na_color, na_txt, nah_str, nal_str, show_nyam_box, nyam_box_transp, show_nyam_pivots, show_nyam_labels)
+bandz_manage_session(lunchBook, use_nylu, t_nl, nl_color, nl_txt, nlh_str, nll_str, show_nylu_box, nylu_box_transp, show_nylu_pivots, show_nylu_labels)
+bandz_manage_session(premarketBook, use_nypm, t_np, np_color, np_txt, nph_str, npl_str, show_nypm_box, nypm_box_transp, show_nypm_pivots, show_nypm_labels)
+bandz_manage_session(sessionSixBook, use_kz6, t_k6, k6_color, k6_txt, k6h_str, k6l_str, show_kz6_box, kz6_box_transp, show_kz6_pivots, show_kz6_labels)
+bandz_manage_session(sessionSevenBook, use_kz7, t_k7, k7_color, k7_txt, k7h_str, k7l_str, show_kz7_box, kz7_box_transp, show_kz7_pivots, show_kz7_labels)
+
+bandz_min_completed_samples() =>
+    int minimum = na
+    if asiaBook.completedRanges.size() > 0
+        minimum := asiaBook.completedRanges.size()
+    if londonBook.completedRanges.size() > 0
+        minimum := na(minimum) ? londonBook.completedRanges.size() : math.min(minimum, londonBook.completedRanges.size())
+    if openingRangeBook.completedRanges.size() > 0
+        minimum := na(minimum) ? openingRangeBook.completedRanges.size() : math.min(minimum, openingRangeBook.completedRanges.size())
+    if lunchBook.completedRanges.size() > 0
+        minimum := na(minimum) ? lunchBook.completedRanges.size() : math.min(minimum, lunchBook.completedRanges.size())
+    if premarketBook.completedRanges.size() > 0
+        minimum := na(minimum) ? premarketBook.completedRanges.size() : math.min(minimum, premarketBook.completedRanges.size())
+    if sessionSixBook.completedRanges.size() > 0
+        minimum := na(minimum) ? sessionSixBook.completedRanges.size() : math.min(minimum, sessionSixBook.completedRanges.size())
+    if sessionSevenBook.completedRanges.size() > 0
+        minimum := na(minimum) ? sessionSevenBook.completedRanges.size() : math.min(minimum, sessionSevenBook.completedRanges.size())
+    na(minimum) ? 0 : minimum
+
+bandz_current_session_range(BandzSessionBook book) =>
+    float result = na
+    if book.history.size() > 0
+        BandzSessionDrawing current = book.history.get(0)
+        result := current.currentRange
+    result
+
+bandz_session_table_row(table statsTable, BandzSessionBook book, int row, string rowText, bool enabled, bool active, color rowColor, int rowTransparency) =>
+    if enabled
+        float currentValue = bandz_current_session_range(book)
+        string currentText = na(currentValue) ? "—" : str.tostring(currentValue)
+        table.cell(statsTable, 0, row, rowText, text_size = range_size, bgcolor = bandz_session_fill(rowColor, rowTransparency), text_color = txt_color)
+        table.cell(statsTable, 1, row, currentText, text_size = range_size, bgcolor = active ? bandz_session_fill(rowColor, rowTransparency) : na, text_color = txt_color)
+        if show_range_avg
+            float averageValue = book.completedRanges.size() > 0 ? book.completedRanges.avg() : na
+            table.cell(statsTable, 2, row, na(averageValue) ? "—" : str.tostring(averageValue), text_size = range_size, text_color = txt_color)
+
+if show_range and bandz_session_timeframe_allowed and barstate.islast
+    var table bandzSessionStats = table.new(range_pos, 10, 10, bgcolor = chart.bg_color, frame_color = chart.fg_color, frame_width = 2, border_color = chart.fg_color, border_width = 1)
+    table.clear(bandzSessionStats, 0, 0, 9, 9)
+    table.cell(bandzSessionStats, 0, 0, "Killzone", text_size = range_size, text_color = txt_color)
+    table.cell(bandzSessionStats, 1, 0, "Range", text_size = range_size, text_color = txt_color)
+    if show_range_avg
+        table.cell(bandzSessionStats, 2, 0, "Avg (" + str.tostring(bandz_min_completed_samples()) + ")", text_size = range_size, text_color = txt_color)
+
+    bandz_session_table_row(bandzSessionStats, asiaBook, 1, as_txt, use_asia, t_as, as_color, asia_box_transp)
+    bandz_session_table_row(bandzSessionStats, londonBook, 2, lo_txt, use_london, t_lo, lo_color, london_box_transp)
+    bandz_session_table_row(bandzSessionStats, openingRangeBook, 3, na_txt, use_nyam, t_na, na_color, nyam_box_transp)
+    bandz_session_table_row(bandzSessionStats, lunchBook, 4, nl_txt, use_nylu, t_nl, nl_color, nylu_box_transp)
+    bandz_session_table_row(bandzSessionStats, premarketBook, 5, np_txt, use_nypm, t_np, np_color, nypm_box_transp)
+    bandz_session_table_row(bandzSessionStats, sessionSixBook, 6, k6_txt, use_kz6, t_k6, k6_color, kz6_box_transp)
+    bandz_session_table_row(bandzSessionStats, sessionSevenBook, 7, k7_txt, use_kz7, t_k7, k7_color, kz7_box_transp)
+
+//needed
